@@ -34,17 +34,57 @@ pip install scikit-learn pandas numpy
 
 ## Quick Start
 
+The pipeline auto-detects whether your target is **classification** or
+**regression** — no configuration needed.
+
 ```python
 import pandas as pd
 from ml_model_toolkit import MLDeveloperPipeline
 
 df = pd.read_csv('your_data.csv')
 
+# Classification (binary/multi-class target)
 pipeline = MLDeveloperPipeline(df, target_col='target')
 pipeline.run_full()  # analysis → preprocess → model → evaluate → deploy
 
-print(pipeline.metrics['accuracy'])
-pipeline.save_model()  # model + scaler + metrics -> models/ml_model.pkl
+# Regression (continuous target)
+pipeline = MLDeveloperPipeline(df, target_col='house_price')
+pipeline.run_full()
+
+print(pipeline.problem_type)  # 'classification' or 'regression'
+print(pipeline.metrics['accuracy'])  # or 'r2_score' for regression
+```
+
+### Classification vs Regression
+
+| Problem type | Detected from | Algorithms | Metrics |
+|--------------|---------------|------------|---------|
+| Classification | ≤20 unique target values | logistic_regression, random_forest, gradient_boosting, adaboost, svm_rbf, knn, naive_bayes | accuracy, confusion_matrix, roc_auc |
+| Regression | continuous target | linear_regression, ridge, lasso, random_forest_reg, gradient_boosting_reg, svm_rbf_reg | r2_score, rmse, mae |
+
+The problem type is auto-detected from the target column — no flag needed.
+
+### Model Comparison & Cross-Validation
+
+`build_model` supports 7 algorithms (classification) or 6 (regression) and
+benchmarks them with cross-validation. `compare_models` picks the best.
+
+```python
+pipeline.compare_models()  # benchmark all algorithms
+print(pipeline.metrics['best_algorithm'])
+print(pipeline.metrics['model_comparison'])
+```
+
+Or run the full workflow with automatic comparison:
+
+```python
+pipeline.run_full(compare=True)  # trains all, picks best
+```
+
+Customise cross-validation folds:
+
+```python
+pipeline.build_model(algorithm='random_forest', cv_folds=10)
 ```
 
 ## Workflow Stages

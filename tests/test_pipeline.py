@@ -79,3 +79,52 @@ def test_run_full_compare():
     p.run_full(compare=True, cv_folds=3)
     assert "best_algorithm" in p.metrics
     assert "model_comparison" in p.metrics
+
+
+def _make_reg_data(n=100):
+    rng = np.random.default_rng(0)
+    return pd.DataFrame({
+        "age": rng.integers(18, 70, n),
+        "salary": rng.normal(60000, 15000, n),
+        "years_exp": rng.integers(0, 30, n),
+        "house_price": rng.normal(300000, 50000, n),
+    })
+
+
+def test_detect_problem_type_classification():
+    p = MLDeveloperPipeline(_make_data(), target_col="target")
+    assert p._detect_problem_type(p.df["target"]) == "classification"
+
+
+def test_detect_problem_type_regression():
+    p = MLDeveloperPipeline(_make_reg_data(), target_col="house_price")
+    assert p._detect_problem_type(p.df["house_price"]) == "regression"
+
+
+def test_regression_pipeline_runs():
+    df = _make_reg_data()
+    p = MLDeveloperPipeline(df, target_col="house_price")
+    p.run_full()
+    assert p.problem_type == "regression"
+    assert "r2_score" in p.metrics
+    assert "rmse" in p.metrics
+    assert p.model is not None
+
+
+def test_regression_compare_models():
+    df = _make_reg_data()
+    p = MLDeveloperPipeline(df, target_col="house_price")
+    p.preprocess()
+    p.compare_models()
+    assert "model_comparison" in p.metrics
+    assert "best_algorithm" in p.metrics
+    assert "linear_regression" in p.metrics["model_comparison"]
+
+
+def test_regression_no_classification_metrics():
+    df = _make_reg_data()
+    p = MLDeveloperPipeline(df, target_col="house_price")
+    p.run_full()
+    assert "accuracy" not in p.metrics
+    assert "confusion_matrix" not in p.metrics
+    assert "r2_score" in p.metrics

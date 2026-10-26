@@ -17,7 +17,11 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier,
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.naive_bayes import GaussianNB
-from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.linear_model import LinearRegression, Ridge, Lasso
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.svm import SVR
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
 from sklearn.metrics import (accuracy_score, confusion_matrix,
                              roc_auc_score, classification_report)
 
@@ -38,6 +42,7 @@ class MLDeveloperPipeline:
         self.log = []
         self.model_path = self.config.get("model_path", "models/ml_model.pkl")
         self.report_path = self.config.get("report_path", "reports/ml_report.json")
+        self.problem_type = None  # 'classification' or 'regression'
 
     def _log(self, msg):
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -91,12 +96,23 @@ class MLDeveloperPipeline:
         return self
 
     # 3. MODEL DEVELOPMENT
+    def _detect_problem_type(self, y):
+        """Auto-detect classification vs regression from target values."""
+        n_unique = y.nunique()
+        if n_unique <= 20 and y.dtype in [np.int64, np.int32, np.float64]:
+            # Check if looks categorical (few unique ints) vs continuous
+            if n_unique <= 10 and (y.value_counts().max() / len(y) > 0.05 or y.dtype == np.int64):
+                return "classification"
+        return "regression"
+
     def build_model(self, algorithm="logistic_regression", cv_folds=5):
         """Train model with algorithm selection and cross-validation.
         Algorithms: logistic_regression, random_forest, gradient_boosting,
         adaboost, svm_rbf, knn, naive_bayes.
         """
-        algorithms = {
+        # Auto-detect problem type from target column
+        self.problem_type = self._detect_problem_type(self.df[self.target_col])
+        algorithms_class = {
             "logistic_regression": LogisticRegression(max_iter=1000, solver="lbfgs"),
             "random_forest": RandomForestClassifier(n_estimators=100, random_state=42),
             "gradient_boosting": GradientBoostingClassifier(random_state=42),
@@ -105,41 +121,66 @@ class MLDeveloperPipeline:
             "knn": KNeighborsClassifier(n_neighbors=5),
             "naive_bayes": GaussianNB(),
         }
-        if algorithm not in algorithms:
-            raise ValueError(f"Unknown algorithm: {algorithm}. Choose from {list(algorithms)}")
-        self.model = algorithms[algorithm]
+        algorithms_reg = {
+            "linear_regression": LinearRegression(),
+            "ridge": Ridge(random_state=42),
+            "lasso": Lasso(random_state=42),
+            "random_forest_reg": RandomForestRegressor(n_estimators=100, random_state=42),
+            "gradient_boosting_reg": GradientBoostingRegressor(random_state=42),
+            "svm_rbf_reg": SVR(kernel="rbf"),
+        }
+        if self.problem_type == "regression":
+            all_algs = algorithms_reg
+        else:
+            all_algs = algorithms_class
+        if algorithm not in all_algs:
+            raise ValueError(f"Unknown algorithm: {algorithm}. Choose from {list(all_algs)}")
+        self.model = all_algs[algorithm]
         # Cross-validation on training data
-        cv_scores = cross_val_score(self.model, self.X_train, self.y_train,
-                                    cv=StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42),
-                                    scoring="accuracy")
-        self.metrics["cv_accuracy_mean"] = round(float(cv_scores.mean()), 4)
-        self.metrics["cv_accuracy_std"] = round(float(cv_scores.std()), 4)
+        if self.problem_type == "regression":
+            cv_kf = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+            cv_scores = cross_val_score(self.model, self.X_train, self.y_train,
+                                        cv=cv_kf, scoring="r2")
+            self.metrics["cv_r2_mean"] = round(float(cv_scores.mean()), 4)
+            self.metrics["cv_r2_std"] = round(float(cv_scores.std()), 4)
+        else:
+            cv_scores = cross_val_score(self.model, self.X_train, self.y_train,
+                                        cv=StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42),
+                                        scoring="accuracy")
+            self.metrics["cv_accuracy_mean"] = round(float(cv_scores.mean()), 4)
+            self.metrics["cv_accuracy_std"] = round(float(cv_scores.std()), 4)
         self.model.fit(self.X_train, self.y_train)
-        self._log(f"Model Development — {algorithm} trained; CV accuracy: {self.metrics['cv_accuracy_mean']:.3f} ± {self.metrics['cv_accuracy_std']:.3f}")
+        key = "cv_r2_mean" if self.problem_type == "regression" else "cv_accuracy_mean"
+        self._log(f"Model Development — {algorithm} trained; CV: {self.metrics[key]:.3f} ± {self.metrics.get(key.replace('mean','std'),0):.3f}")
         return self
 
     # 4. EVALUATION
     def evaluate_model(self):
-        """Compute accuracy, confusion matrix, ROC/AUC, report."""
+        """Compute metrics — classification (accuracy/confusion/ROC/AUC) or regression (R2/RMSE/MAE)."""
         y_pred = self.model.predict(self.X_test)
         self.predictions = y_pred
-        acc = accuracy_score(self.y_test, y_pred)
-        self.metrics["accuracy"] = round(float(acc), 4)
-        self.metrics["confusion_matrix"] = confusion_matrix(self.y_test, y_pred).tolist()
-        try:
-            if hasattr(self.model, "predict_proba"):
-                scores = self.model.predict_proba(self.X_test)[:, 1]
-            elif hasattr(self.model, "decision_function"):
-                scores = self.model.decision_function(self.X_test)
-            else:
-                scores = y_pred
-            self.metrics["roc_auc"] = round(float(roc_auc_score(self.y_test, scores)), 4)
-        except Exception:
-            self.metrics["roc_auc"] = None
-        self._log(f"Evaluation — Accuracy: {acc:.3f}")
-        # Classification report (string)
-        self.metrics["classification_report"] = classification_report(
-            self.y_test, y_pred, digits=3, output_dict=True)
+        if self.problem_type == "regression":
+            self.metrics["r2_score"] = round(float(r2_score(self.y_test, y_pred)), 4)
+            self.metrics["rmse"] = round(float(np.sqrt(mean_squared_error(self.y_test, y_pred))), 4)
+            self.metrics["mae"] = round(float(mean_absolute_error(self.y_test, y_pred)), 4)
+            self._log(f"Evaluation — R2: {self.metrics['r2_score']:.3f}  RMSE: {self.metrics['rmse']:.3f}")
+        else:
+            acc = accuracy_score(self.y_test, y_pred)
+            self.metrics["accuracy"] = round(float(acc), 4)
+            self.metrics["confusion_matrix"] = confusion_matrix(self.y_test, y_pred).tolist()
+            try:
+                if hasattr(self.model, "predict_proba"):
+                    scores = self.model.predict_proba(self.X_test)[:, 1]
+                elif hasattr(self.model, "decision_function"):
+                    scores = self.model.decision_function(self.X_test)
+                else:
+                    scores = y_pred
+                self.metrics["roc_auc"] = round(float(roc_auc_score(self.y_test, scores)), 4)
+            except Exception:
+                self.metrics["roc_auc"] = None
+            self._log(f"Evaluation — Accuracy: {acc:.3f}")
+            self.metrics["classification_report"] = classification_report(
+                self.y_test, y_pred, digits=3, output_dict=True)
         return self
 
     # 5. DEPLOYMENT PREP
@@ -182,29 +223,43 @@ class MLDeveloperPipeline:
         Returns the winning algorithm name and stores all results in
         self.metrics['model_comparison'].
         """
+        if self.problem_type is None:
+            self.problem_type = self._detect_problem_type(self.df[self.target_col])
         if algorithms is None:
-            algorithms = ["logistic_regression", "random_forest",
-                          "gradient_boosting", "adaboost",
-                          "svm_rbf", "knn", "naive_bayes"]
+            if self.problem_type == "regression":
+                algorithms = ["linear_regression", "ridge", "lasso",
+                              "random_forest_reg", "gradient_boosting_reg",
+                              "svm_rbf_reg"]
+            else:
+                algorithms = ["logistic_regression", "random_forest",
+                              "gradient_boosting", "adaboost",
+                              "svm_rbf", "knn", "naive_bayes"]
         results = {}
         for algo in algorithms:
             try:
                 self.build_model(algorithm=algo, cv_folds=cv_folds)
-                results[algo] = {
-                    "cv_accuracy_mean": self.metrics.get("cv_accuracy_mean"),
-                    "cv_accuracy_std": self.metrics.get("cv_accuracy_std"),
-                    "test_accuracy": self.metrics.get("accuracy"),
-                }
+                if self.problem_type == "regression":
+                    results[algo] = {
+                        "cv_r2_mean": self.metrics.get("cv_r2_mean"),
+                        "cv_r2_std": self.metrics.get("cv_r2_std"),
+                        "test_r2": self.metrics.get("r2_score"),
+                        "test_rmse": self.metrics.get("rmse"),
+                    }
+                else:
+                    results[algo] = {
+                        "cv_accuracy_mean": self.metrics.get("cv_accuracy_mean"),
+                        "cv_accuracy_std": self.metrics.get("cv_accuracy_std"),
+                        "test_accuracy": self.metrics.get("accuracy"),
+                    }
             except Exception as e:
                 self._log(f"compare_models: {algo} failed — {e}")
                 results[algo] = {"error": str(e)}
         self.metrics["model_comparison"] = results
-        # Pick best by CV mean
-        best = max(results.items(),
-                   key=lambda kv: kv[1].get("cv_accuracy_mean", -1))
+        key = "cv_r2_mean" if self.problem_type == "regression" else "cv_accuracy_mean"
+        best = max(results.items(), key=lambda kv: kv[1].get(key, -1))
         self.best_algorithm = best[0]
         self.metrics["best_algorithm"] = best[0]
-        self._log(f"compare_models: best = {best[0]} (CV {best[1]['cv_accuracy_mean']:.3f})")
+        self._log(f"compare_models: best = {best[0]} (CV {key}: {best[1][key]:.3f})")
         return self
 
     def run_full(self, df=None, target_col="target", algorithm="logistic_regression",
