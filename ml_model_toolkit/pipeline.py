@@ -194,11 +194,39 @@ class MLDeveloperPipeline:
             "metrics": self.metrics,
             "log": self.log,
             "target_col": self.target_col,
+            "problem_type": self.problem_type,
             "created_at": datetime.datetime.now().isoformat(),
         }
         with open(path, "wb") as f:
             pickle.dump(artifact, f)
         self._log(f"Deployment Prep — model saved to {path}")
+        return self
+
+    def export_model(self, path=None, fmt="joblib"):
+        """Export the trained model in a portable format.
+
+        fmt : str
+            "joblib" (default) or "pickle". Both serialize the model + scaler
+            + metadata; joblib is faster for large sklearn objects.
+        """
+        path = path or self.model_path
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        artifact = {
+            "model": self.model,
+            "scaler": self.scaler,
+            "metrics": self.metrics,
+            "target_col": self.target_col,
+            "problem_type": self.problem_type,
+            "feature_names": list(self.X_train.columns) if hasattr(self, "X_train") else None,
+            "created_at": datetime.datetime.now().isoformat(),
+        }
+        if fmt == "joblib":
+            import joblib
+            joblib.dump(artifact, path)
+        else:
+            with open(path, "wb") as f:
+                pickle.dump(artifact, f)
+        self._log(f"Deployment Prep — model exported ({fmt}) to {path}")
         return self
 
     def generate_report(self):
@@ -217,8 +245,15 @@ class MLDeveloperPipeline:
         self._log(f"Report saved to {path}")
         return self
 
-    def compare_models(self, algorithms=None, cv_folds=5):
-        """Benchmark multiple algorithms with cross-validation and pick the best.
+    def compare_models(self, algorithms=None, cv_folds=5,
+                      compare_metric=None, include_metrics=None):
+        """Benchmark algorithms; let user pick comparison metric and included results.
+
+        compare_metric : str, optional
+            Metric key to pick best (e.g. 'cv_accuracy_mean', 'r2_score', 'rmse').
+            Default: auto by problem type.
+        include_metrics : list[str], optional
+            Extra metric keys to record per algorithm (default: all likely).
 
         Returns the winning algorithm name and stores all results in
         self.metrics['model_comparison'].
@@ -239,32 +274,43 @@ class MLDeveloperPipeline:
             try:
                 self.build_model(algorithm=algo, cv_folds=cv_folds)
                 if self.problem_type == "regression":
-                    results[algo] = {
-                        "cv_r2_mean": self.metrics.get("cv_r2_mean"),
-                        "cv_r2_std": self.metrics.get("cv_r2_std"),
-                        "test_r2": self.metrics.get("r2_score"),
-                        "test_rmse": self.metrics.get("rmse"),
-                    }
+                    base = {"cv_r2_mean": self.metrics.get("cv_r2_mean"),
+                            "cv_r2_std": self.metrics.get("cv_r2_std"),
+                            "test_r2": self.metrics.get("r2_score"),
+                            "test_rmse": self.metrics.get("rmse"),
+                            "test_mae": self.metrics.get("mae")}
                 else:
-                    results[algo] = {
-                        "cv_accuracy_mean": self.metrics.get("cv_accuracy_mean"),
-                        "cv_accuracy_std": self.metrics.get("cv_accuracy_std"),
-                        "test_accuracy": self.metrics.get("accuracy"),
-                    }
+                    base = {"cv_accuracy_mean": self.metrics.get("cv_accuracy_mean"),
+                            "cv_accuracy_std": self.metrics.get("cv_accuracy_std"),
+                            "test_accuracy": self.metrics.get("accuracy"),
+                            "test_roc_auc": self.metrics.get("roc_auc")}
+                if include_metrics:
+                    for m in include_metrics:
+                        if m in self.metrics:
+                            base[m] = self.metrics.get(m)
+                results[algo] = base
             except Exception as e:
                 self._log(f"compare_models: {algo} failed — {e}")
                 results[algo] = {"error": str(e)}
         self.metrics["model_comparison"] = results
-        key = "cv_r2_mean" if self.problem_type == "regression" else "cv_accuracy_mean"
-        best = max(results.items(), key=lambda kv: kv[1].get(key, -1))
+        key = compare_metric or ("cv_r2_mean" if self.problem_type == "regression"
+                                 else "cv_accuracy_mean")
+        # Lower is better for error metrics (rmse, mae)
+        lower_better = key in ("rmse", "mae", "test_rmse", "test_mae")
+        def _score(kv):
+            v = kv[1].get(key)
+            return -v if (lower_better and v is not None) else (v if v is not None else -1)
+        best = max(results.items(), key=_score)
         self.best_algorithm = best[0]
         self.metrics["best_algorithm"] = best[0]
-        self._log(f"compare_models: best = {best[0]} (CV {key}: {best[1][key]:.3f})")
+        self._log(f"compare_models: best = {best[0]} ({key}: {best[1].get(key):.3f})")
         return self
 
     def run_full(self, df=None, target_col="target", algorithm="logistic_regression",
-                 compare=False, cv_folds=5):
-        """Full ML workflow: 1→2→3→4→5.
+                 compare=False, cv_folds=5, compare_metric=None,
+                 include_metrics=None, export=False, export_path=None,
+                 export_fmt="joblib"):
+        """Full ML workflow: 1->2->3->4->5.
 
         Parameters
         ----------
@@ -278,6 +324,16 @@ class MLDeveloperPipeline:
             If True, benchmark all algorithms and pick the best.
         cv_folds : int
             Number of cross-validation folds.
+        compare_metric : str, optional
+            Metric key used to pick the best model (e.g. 'rmse').
+        include_metrics : list[str], optional
+            Extra metric keys recorded per algorithm in the comparison.
+        export : bool
+            If True, export the winning model with export_model().
+        export_path : str, optional
+            Path for the exported model.
+        export_fmt : str
+            "joblib" or "pickle".
         """
         if df is not None:
             self.df = df.copy() if hasattr(df,"copy") else df
@@ -286,7 +342,8 @@ class MLDeveloperPipeline:
         self.analyze_data()
         self.preprocess()
         if compare:
-            self.compare_models(cv_folds=cv_folds)
+            self.compare_models(cv_folds=cv_folds, compare_metric=compare_metric,
+                                include_metrics=include_metrics)
             algorithm = getattr(self, "best_algorithm", algorithm)
             self.build_model(algorithm=algorithm, cv_folds=cv_folds)
         else:
@@ -294,6 +351,8 @@ class MLDeveloperPipeline:
         self.evaluate_model()
         self.save_model()
         self.save_report()
+        if export:
+            self.export_model(path=export_path, fmt=export_fmt)
         self._log("=== ML MODEL WORKFLOW COMPLETE ===")
         return self
 
