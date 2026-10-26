@@ -81,6 +81,7 @@ class MLDeveloperPipeline:
                 df[col] = df[col].fillna(df[col].mean())
         # Feature / target split
         feature_cols = [c for c in df.columns if c != self.target_col]
+        self.problem_type = self._detect_problem_type(df[self.target_col])
         X = df[feature_cols].fillna(0)
         y = df[self.target_col]
         if y.dtype == object: y = pd.Categorical(y).codes
@@ -92,7 +93,7 @@ class MLDeveloperPipeline:
                                     columns=self.X_train.columns, index=self.X_train.index)
         self.X_test = pd.DataFrame(self.scaler.transform(self.X_test),
                                    columns=self.X_test.columns, index=self.X_test.index)
-        self._log("Preprocess: train/test split + StandardScaler applied")
+        self._log(f"Preprocess: train/test split + StandardScaler applied ({self.problem_type})")
         return self
 
     # 3. MODEL DEVELOPMENT
@@ -306,7 +307,7 @@ class MLDeveloperPipeline:
         self._log(f"compare_models: best = {best[0]} ({key}: {best[1].get(key):.3f})")
         return self
 
-    def run_full(self, df=None, target_col="target", algorithm="logistic_regression",
+    def run_full(self, df=None, target_col="target", algorithm=None,
                  compare=False, cv_folds=5, compare_metric=None,
                  include_metrics=None, export=False, export_path=None,
                  export_fmt="joblib"):
@@ -318,8 +319,9 @@ class MLDeveloperPipeline:
             Input data. If None, uses the frame passed at construction.
         target_col : str
             Name of the target column.
-        algorithm : str
-            Model algorithm to train.
+        algorithm : str, optional
+            Model algorithm to train. Defaults to logistic_regression for
+            classification and linear_regression for regression.
         compare : bool
             If True, benchmark all algorithms and pick the best.
         cv_folds : int
@@ -341,6 +343,10 @@ class MLDeveloperPipeline:
             self.target_col = target_col
         self.analyze_data()
         self.preprocess()
+        if algorithm is None:
+            algorithm = ("linear_regression"
+                         if self.problem_type == "regression"
+                         else "logistic_regression")
         if compare:
             self.compare_models(cv_folds=cv_folds, compare_metric=compare_metric,
                                 include_metrics=include_metrics)

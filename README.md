@@ -29,7 +29,7 @@ pip install scikit-learn pandas numpy
 ### Requirements
 
 - Python 3.8+
-- `pandas`, `numpy`, `scikit-learn` (installed automatically)
+- `pandas`, `numpy`, `scikit-learn`, `joblib` (installed automatically)
 - `pyspark` (optional, for PySpark DataFrames)
 
 ## Quick Start
@@ -80,6 +80,47 @@ Or run the full workflow with automatic comparison:
 ```python
 pipeline.run_full(compare=True)  # trains all, picks best
 ```
+
+### Pick the comparison metric
+
+By default the best algorithm is chosen on cross-validation score
+(`cv_accuracy_mean` for classification, `cv_r2_mean` for regression).
+Override it — useful for error metrics where **lower is better**:
+
+```python
+# regression: rank models by test RMSE (lower wins)
+pipeline.compare_models(compare_metric='test_rmse')
+
+# classification: rank by test ROC-AUC
+pipeline.compare_models(compare_metric='test_roc_auc')
+```
+
+Record extra metrics per algorithm with `include_metrics`:
+
+```python
+pipeline.compare_models(include_metrics=['test_roc_auc', 'test_mae'])
+```
+
+### Model Export
+
+`save_model` writes a pickle artifact. For portable deployment use
+`export_model` (joblib by default, faster for large sklearn objects):
+
+```python
+pipeline.export_model(path='models/best.joblib', fmt='joblib')
+# or fmt='pickle'
+```
+
+Or export as part of the full workflow:
+
+```python
+pipeline.run_full(compare=True, export=True,
+                  export_path='models/best.joblib',
+                  export_fmt='joblib')
+```
+
+The exported file contains the model, scaler, metrics, feature names,
+problem type, and target column — reload with `joblib.load`.
 
 Customise cross-validation folds:
 
