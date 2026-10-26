@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ml-model-toolkit"
+version = "1.0.0"
+description = "ML Model Developer pipeline — agent-data-ml-model workflow (analysis → preprocessing → model → evaluation → deployment)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [{name = "James Lam"}]
+dependencies = [
+    "pandas",
+    "numpy",
+    "scikit-learn",
+]
+
+[project.optional-dependencies]
+pyspark = ["pyspark"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ml_model_toolkit*"]
+
+[project.urls]
+Homepage = "https://github.com/jameslam-stack/ml-model-develop"
+Repository = "https://github.com/jameslam-stack/ml-model-develop"
