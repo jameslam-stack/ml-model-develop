@@ -13,7 +13,11 @@ import pandas as pd
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, AdaBoostClassifier
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.model_selection import cross_val_score, StratifiedKFold
 from sklearn.metrics import (accuracy_score, confusion_matrix,
                              roc_auc_score, classification_report)
 
@@ -87,14 +91,31 @@ class MLDeveloperPipeline:
         return self
 
     # 3. MODEL DEVELOPMENT
-    def build_model(self, algorithm="logistic_regression"):
-        """Train model; support RF or LogisticRegression."""
-        if algorithm == "random_forest":
-            self.model = RandomForestClassifier(n_estimators=100, random_state=42)
-        else:
-            self.model = LogisticRegression(max_iter=1000, solver="lbfgs")
+    def build_model(self, algorithm="logistic_regression", cv_folds=5):
+        """Train model with algorithm selection and cross-validation.
+        Algorithms: logistic_regression, random_forest, gradient_boosting,
+        adaboost, svm_rbf, knn, naive_bayes.
+        """
+        algorithms = {
+            "logistic_regression": LogisticRegression(max_iter=1000, solver="lbfgs"),
+            "random_forest": RandomForestClassifier(n_estimators=100, random_state=42),
+            "gradient_boosting": GradientBoostingClassifier(random_state=42),
+            "adaboost": AdaBoostClassifier(random_state=42),
+            "svm_rbf": SVC(kernel="rbf", random_state=42),
+            "knn": KNeighborsClassifier(n_neighbors=5),
+            "naive_bayes": GaussianNB(),
+        }
+        if algorithm not in algorithms:
+            raise ValueError(f"Unknown algorithm: {algorithm}. Choose from {list(algorithms)}")
+        self.model = algorithms[algorithm]
+        # Cross-validation on training data
+        cv_scores = cross_val_score(self.model, self.X_train, self.y_train,
+                                    cv=StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42),
+                                    scoring="accuracy")
+        self.metrics["cv_accuracy_mean"] = round(float(cv_scores.mean()), 4)
+        self.metrics["cv_accuracy_std"] = round(float(cv_scores.std()), 4)
         self.model.fit(self.X_train, self.y_train)
-        self._log(f"Model Development — {algorithm} trained")
+        self._log(f"Model Development — {algorithm} trained; CV accuracy: {self.metrics['cv_accuracy_mean']:.3f} ± {self.metrics['cv_accuracy_std']:.3f}")
         return self
 
     # 4. EVALUATION
@@ -106,7 +127,13 @@ class MLDeveloperPipeline:
         self.metrics["accuracy"] = round(float(acc), 4)
         self.metrics["confusion_matrix"] = confusion_matrix(self.y_test, y_pred).tolist()
         try:
-            self.metrics["roc_auc"] = round(float(roc_auc_score(self.y_test, self.model.predict_proba(self.X_test)[:,1])), 4)
+            if hasattr(self.model, "predict_proba"):
+                scores = self.model.predict_proba(self.X_test)[:, 1]
+            elif hasattr(self.model, "decision_function"):
+                scores = self.model.decision_function(self.X_test)
+            else:
+                scores = y_pred
+            self.metrics["roc_auc"] = round(float(roc_auc_score(self.y_test, scores)), 4)
         except Exception:
             self.metrics["roc_auc"] = None
         self._log(f"Evaluation — Accuracy: {acc:.3f}")
@@ -149,15 +176,66 @@ class MLDeveloperPipeline:
         self._log(f"Report saved to {path}")
         return self
 
-    def run_full(self, df=None, target_col="target", algorithm="logistic_regression"):
-        """Full ML workflow: 1→2→3→4→5."""
+    def compare_models(self, algorithms=None, cv_folds=5):
+        """Benchmark multiple algorithms with cross-validation and pick the best.
+
+        Returns the winning algorithm name and stores all results in
+        self.metrics['model_comparison'].
+        """
+        if algorithms is None:
+            algorithms = ["logistic_regression", "random_forest",
+                          "gradient_boosting", "adaboost",
+                          "svm_rbf", "knn", "naive_bayes"]
+        results = {}
+        for algo in algorithms:
+            try:
+                self.build_model(algorithm=algo, cv_folds=cv_folds)
+                results[algo] = {
+                    "cv_accuracy_mean": self.metrics.get("cv_accuracy_mean"),
+                    "cv_accuracy_std": self.metrics.get("cv_accuracy_std"),
+                    "test_accuracy": self.metrics.get("accuracy"),
+                }
+            except Exception as e:
+                self._log(f"compare_models: {algo} failed — {e}")
+                results[algo] = {"error": str(e)}
+        self.metrics["model_comparison"] = results
+        # Pick best by CV mean
+        best = max(results.items(),
+                   key=lambda kv: kv[1].get("cv_accuracy_mean", -1))
+        self.best_algorithm = best[0]
+        self.metrics["best_algorithm"] = best[0]
+        self._log(f"compare_models: best = {best[0]} (CV {best[1]['cv_accuracy_mean']:.3f})")
+        return self
+
+    def run_full(self, df=None, target_col="target", algorithm="logistic_regression",
+                 compare=False, cv_folds=5):
+        """Full ML workflow: 1→2→3→4→5.
+
+        Parameters
+        ----------
+        df : DataFrame, optional
+            Input data. If None, uses the frame passed at construction.
+        target_col : str
+            Name of the target column.
+        algorithm : str
+            Model algorithm to train.
+        compare : bool
+            If True, benchmark all algorithms and pick the best.
+        cv_folds : int
+            Number of cross-validation folds.
+        """
         if df is not None:
             self.df = df.copy() if hasattr(df,"copy") else df
             self.backend = get_backend(self.df)
             self.target_col = target_col
         self.analyze_data()
         self.preprocess()
-        self.build_model(algorithm=algorithm)
+        if compare:
+            self.compare_models(cv_folds=cv_folds)
+            algorithm = getattr(self, "best_algorithm", algorithm)
+            self.build_model(algorithm=algorithm, cv_folds=cv_folds)
+        else:
+            self.build_model(algorithm=algorithm, cv_folds=cv_folds)
         self.evaluate_model()
         self.save_model()
         self.save_report()
